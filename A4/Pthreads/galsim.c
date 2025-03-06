@@ -1,5 +1,6 @@
 // This version uses pthreads to parallelize the simulation loop.
-// I have put the newly 
+// I have put the newly created code at the top of the file.
+// The rest of the code is the same as the serial version.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,10 @@ typedef struct {
     double y;
 } Vector2D;
 
+// Creating a global ACCx and ACCy array to store the acceleration of all particles for each thread
+double *GACCx;
+double *GACCy;
+
 // Function prototypes for the serial functions (not used by the parallel code)
 // We now inline the work in the threads.
 static double get_wall_seconds();
@@ -21,9 +26,7 @@ static double get_wall_seconds();
 // Structure to pass thread arguments
 typedef struct {
     int tid;           // thread id
-    int start;         // starting index (inclusive)
-    pthread_mutex_t *mutex; // Array of mutexes for ACCx and ACCy
-    int end;           // ending index (exclusive)
+    int nthreads;      // number of threads
     int nsteps;        // number of timesteps
     int nstars;        // total number of stars
     double stepsize;   // size of each timestep
@@ -46,18 +49,22 @@ void *simulation_thread(void *arg) {
     double stepsize = data->stepsize;
     double G = data->G;
     double e0 = data->e0;
+    int tid = data->tid;
+    int nthr = data->nthreads;
     
         // --- Force Calculation ---
     for (int t = 0; t < data->nsteps; t++) {
-        // Reset acceleration arrays to zero
-    for (int i = data->start; i < data->end; i++) {
-        data->ACCx[i] = 0;
-        data->ACCy[i] = 0;
-    }
+        // Reset Global acceleration arrays to zero
+        for (int i = 0; i < nstars; i++) {
+            GACCx[i + (tid * nstars)] = 0;
+            GACCy[i + (tid * nstars)] = 0;
+        }
+        // Synchronize to ensure all threads have reset acceleration arrays
+    
     pthread_barrier_wait(&barrier);
     // Wait for all threads to reset acceleration arrays
     // Compute forces between stars from assignment 3
-    for (int i = data->start; i < data->end; i++) {
+    for (int i = tid; i < nstars; i += nthr) {
         double posx = data->position[i].x;
         double posy = data->position[i].y;
         double mass_i = data->mass[i];
@@ -78,36 +85,46 @@ void *simulation_thread(void *arg) {
             
             accx -= factor_i * dx;
             accy -= factor_i * dy;
-            // Here we only lock the ACCx and ACCy of the other star
-            pthread_mutex_lock(&data->mutex[j]);
-            data->ACCx[j] += factor_j * dx;
-            data->ACCy[j] += factor_j * dy;
-            pthread_mutex_unlock(&data->mutex[j]);
+
+            GACCx[j + (tid * nstars)] += factor_j * dx;
+            GACCy[j + (tid * nstars)] += factor_j * dy;
+            
         }
-        pthread_mutex_lock(&data->mutex[i]);
-        data->ACCx[i] += accx;
-        data->ACCy[i] += accy;
-        pthread_mutex_unlock(&data->mutex[i]);
+        
+        GACCx[i + (tid * nstars)] += accx;
+        GACCy[i + (tid * nstars)] += accy;
+        
         }
         // Synchronize to ensure all threads have computed forces
         pthread_barrier_wait(&barrier);
         // Now miltiply by G after all threads have computed forces
-        for (int i = data->start; i < data->end; i++) {
-            data->ACCx[i] *= G;
-            data->ACCy[i] *= G;
+        if (tid == 0) {
+            for (int i = 0; i < nstars; i++) {
+                data->ACCx[i] = 0;
+                data->ACCy[i] = 0;
+                for (int j = 0; j < nthr; j++) {
+                    data->ACCx[i] += GACCx[i + (j * nstars)];
+                    data->ACCy[i] += GACCy[i + (j * nstars)];
+                }
+                data->ACCx[i] *= G;
+                data->ACCy[i] *= G;
+            }
         }
 
 
         // Synchronize to ensure all threads have computed forces
+        
         pthread_barrier_wait(&barrier);
         
         // --- Update Velocities and Positions ---
-        for (int i = data->start; i < data->end; i++) {
+        // Update velocities and positions of stars
+        if (tid == 0) {
+        for (int i = 0; i < nstars; i++) {
             data->velocity[i].x += stepsize * data->ACCx[i];
             data->velocity[i].y += stepsize * data->ACCy[i];
             data->position[i].x += stepsize * data->velocity[i].x;
             data->position[i].y += stepsize * data->velocity[i].y;
-        }
+        }}
         // Synchronize to ensure all threads have finished updating before next timestep
         pthread_barrier_wait(&barrier);
         // This is the end of the timestep
@@ -145,13 +162,15 @@ int main(int argc, char* argv[]) {
 
     // Allocate arrays for simulation
     // We pad the arrays to avoid false sharing
-    int padding_size = nstars + 1;
+    int padding_size = nstars ;
     Vector2D* position = (Vector2D*) malloc(padding_size * sizeof(Vector2D));
     double* mass = (double*) malloc(nstars * sizeof(double));
     Vector2D* velocity = (Vector2D*) malloc(padding_size * sizeof(Vector2D));
     double* brightness = (double*) malloc(nstars * sizeof(double));
     double* ACCx = (double*) malloc(padding_size * sizeof(double));
     double* ACCy = (double*) malloc(padding_size * sizeof(double));
+    GACCx = (double*) malloc(padding_size * NUM_THREADS * sizeof(double));
+    GACCy = (double*) malloc(padding_size * NUM_THREADS * sizeof(double));
 
     if (position == NULL || mass == NULL || velocity == NULL || brightness == NULL || ACCx == NULL || ACCy == NULL) {
         fprintf(stderr, "Error allocating memory\n");
@@ -193,26 +212,15 @@ int main(int argc, char* argv[]) {
     // Determine number of threads to use and distribute work
     pthread_t threads[NUM_THREADS];
     ThreadData thread_data[NUM_THREADS];
-    int stars_per_thread = nstars / NUM_THREADS;
-    
-
-    pthread_mutex_t mutex[nstars];
     
     // Initialize barrier for NUM_THREADS threads
     pthread_barrier_init(&barrier, NULL, NUM_THREADS);
-    // Initialize mutex for ACCx and ACCy
-    for (int i = 0; i < nstars; i++) {
-        pthread_mutex_init(&mutex[i], NULL);
-    }
 
     // Create worker threads
-    int start = 0;
     for (int t = 0; t < NUM_THREADS; t++) {
         thread_data[t].tid = t;
-        thread_data[t].start = start;
-        thread_data[t].mutex = mutex;
+        thread_data[t].nthreads = NUM_THREADS;
         // Distribute remainder stars to the last thread
-        thread_data[t].end = (t == NUM_THREADS-1 ? nstars : start + stars_per_thread);
         thread_data[t].nstars = nstars;
         thread_data[t].nsteps = nsteps;
         thread_data[t].stepsize = stepsize;
@@ -223,7 +231,6 @@ int main(int argc, char* argv[]) {
         thread_data[t].mass = mass;
         thread_data[t].ACCx = ACCx;
         thread_data[t].ACCy = ACCy;
-        start += stars_per_thread;
 
         if (pthread_create(&threads[t], NULL, simulation_thread, (void *) &thread_data[t]) != 0) {
             fprintf(stderr, "Error creating thread %d\n", t);
@@ -238,9 +245,6 @@ int main(int argc, char* argv[]) {
 
     // Destroy barrier and mutexes
     pthread_barrier_destroy(&barrier);
-    for (int i = 0; i < nstars; i++) {
-        pthread_mutex_destroy(&mutex[i]);
-    }
 
     // Write out the results to a binary file
     FILE* output = fopen("result.gal", "wb");
