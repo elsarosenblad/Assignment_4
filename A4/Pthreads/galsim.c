@@ -1,4 +1,5 @@
 // This version uses pthreads to parallelize the simulation loop.
+// I have put the newly 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +22,7 @@ static double get_wall_seconds();
 typedef struct {
     int tid;           // thread id
     int start;         // starting index (inclusive)
-    pthread_mutex_t *mutex;
+    pthread_mutex_t *mutex; // Array of mutexes for ACCx and ACCy
     int end;           // ending index (exclusive)
     int nsteps;        // number of timesteps
     int nstars;        // total number of stars
@@ -46,19 +47,23 @@ void *simulation_thread(void *arg) {
     double G = data->G;
     double e0 = data->e0;
     
-    for (int t = 0; t < data->nsteps; t++) {
         // --- Force Calculation ---
-        // For each star i in this partition, compute acceleration from all other stars.
-         // Reset acceleration arrays to zero
+    for (int t = 0; t < data->nsteps; t++) {
+        // Reset acceleration arrays to zero
     for (int i = data->start; i < data->end; i++) {
         data->ACCx[i] = 0;
         data->ACCy[i] = 0;
     }
     pthread_barrier_wait(&barrier);
+    // Wait for all threads to reset acceleration arrays
+    // Compute forces between stars from assignment 3
     for (int i = data->start; i < data->end; i++) {
         double posx = data->position[i].x;
         double posy = data->position[i].y;
         double mass_i = data->mass[i];
+        // This time we just accumulate the forces because the force
+        // on each star is updated by mutliple threads
+        // This is because of Newton's 3rd law
         double accx = 0;
         double accy = 0;
         for (int j = i+1; j < nstars; j++) {
@@ -73,6 +78,7 @@ void *simulation_thread(void *arg) {
             
             accx -= factor_i * dx;
             accy -= factor_i * dy;
+            // Here we only lock the ACCx and ACCy of the other star
             pthread_mutex_lock(&data->mutex[j]);
             data->ACCx[j] += factor_j * dx;
             data->ACCy[j] += factor_j * dy;
@@ -104,6 +110,7 @@ void *simulation_thread(void *arg) {
         }
         // Synchronize to ensure all threads have finished updating before next timestep
         pthread_barrier_wait(&barrier);
+        // This is the end of the timestep
     }
     return NULL;
 }
@@ -128,6 +135,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Limit number of threads to number of stars
     if (NUM_THREADS > nstars) {
         NUM_THREADS = nstars;
     }
@@ -136,6 +144,7 @@ int main(int argc, char* argv[]) {
     const double e0 = 1e-3; // softening factor
 
     // Allocate arrays for simulation
+    // We pad the arrays to avoid false sharing
     int padding_size = nstars + 1;
     Vector2D* position = (Vector2D*) malloc(padding_size * sizeof(Vector2D));
     double* mass = (double*) malloc(nstars * sizeof(double));
@@ -226,6 +235,8 @@ int main(int argc, char* argv[]) {
     for (int t = 0; t < NUM_THREADS; t++) {
         pthread_join(threads[t], NULL);
     }
+
+    // Destroy barrier and mutexes
     pthread_barrier_destroy(&barrier);
     for (int i = 0; i < nstars; i++) {
         pthread_mutex_destroy(&mutex[i]);
