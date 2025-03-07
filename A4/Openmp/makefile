@@ -1,7 +1,7 @@
 CC = gcc
 LD = gcc
-CFLAGS = -O3 -g -Wall -Werror -march=native -funroll-loops -ffast-math -fopt-info-vec-optimized 
-LDFLAGS = -lm -lpthread 
+CFLAGS = -O3 -g -fopenmp -Wall -Werror -march=native -funroll-loops -ffast-math -fopt-info-vec-optimized 
+LDFLAGS = -lm -fopenmp
 RM = /bin/rm -f
 OBJS = galsim.o
 EXECUTABLE = galsim
