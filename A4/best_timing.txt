@@ -1,2 +1,4 @@
-NA
+0.788609
+0.543491
 AMD Opteron(tm) Processor 6282 SE (Vitsippa)
+24

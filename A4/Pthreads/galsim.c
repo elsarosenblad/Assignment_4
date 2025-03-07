@@ -261,7 +261,7 @@ int main(int argc, char *argv[])
         pthread_join(threads[t], NULL);
     }
 
-    // Destroy barrier and mutexes
+    // Destroy barrier
     pthread_barrier_destroy(&barrier);
 
     // Write out the results to a binary file
